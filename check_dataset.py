@@ -4,7 +4,7 @@ DATASET_PATH = Path("FruitGrade_Dataset")
 
 FRUITS = [
     "apple","Apricot","banana","Grapes",
-    "guava","Honeydew","Orange","Tangerine","Watermelon"
+    "guava","Honeydew","Orange","Tangerine"
 ]
 
 GRADES = ["A","B","C"]
