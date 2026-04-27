@@ -1,0 +1,144 @@
+# ============================================================
+#  FruitGrade ML Pipeline — Central Configuration
+# ============================================================
+
+# ----------------------------------------------------------
+# DATA
+# ----------------------------------------------------------
+data:
+  # Raw source dataset (original, never modified)
+  raw_dir: "FruitGrade_Dataset"
+
+  # Folders to SKIP inside raw_dir (case-sensitive folder names)
+  skip_folders:
+    - "real"
+
+  # Supported image extensions
+  image_extensions:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".webp"
+    - ".bmp"
+
+  # Minimum file size in bytes (below = likely corrupt)
+  min_file_size_bytes: 1024
+
+  # Split ratios (must sum to 1.0)
+  train_ratio: 0.70
+  val_ratio:   0.20
+  test_ratio:  0.10
+
+  # Processed split output directories
+  train_dir: "ml/data/train"
+  val_dir:   "ml/data/val"
+  test_dir:  "ml/data/test"
+
+  # Classification mode: 'fruit_grade'  → apple_A, banana_B  (27 classes)
+  class_mode: "fruit_grade"
+
+  # Random seed for reproducible splits
+  split_seed: 42
+
+
+# ----------------------------------------------------------
+# MODEL
+# ----------------------------------------------------------
+model:
+  # EfficientNet backbone from torchvision
+  backbone: "efficientnet_b0"
+  pretrained: true
+
+  # Number of output classes (auto-derived if -1)
+  # 9 fruits × 3 grades = 27 classes
+  num_classes: 27
+
+  # Where best/final checkpoints are saved
+  save_dir: "ml/models/saved"
+  checkpoint_name: "best_model.pth"
+  final_name:      "final_model.pth"
+
+
+# ----------------------------------------------------------
+# TRAINING
+# ----------------------------------------------------------
+training:
+  epochs:           30
+  batch_size:       32
+  num_workers:      4        # DataLoader workers (set 0 on Windows if issues)
+  pin_memory:       true
+
+  # Optimizer
+  optimizer:        "adamw"
+  learning_rate:    0.0003
+  weight_decay:     0.0001
+
+  # LR Scheduler
+  scheduler:        "cosine"   # options: cosine | step | none
+  t_max:            30         # for CosineAnnealingLR
+
+  # Early stopping (patience in epochs)
+  early_stopping_patience: 7
+
+  # Metrics CSV log path
+  metrics_csv: "ml/models/saved/training_metrics.csv"
+
+
+# ----------------------------------------------------------
+# PREPROCESSING / AUGMENTATION
+# ----------------------------------------------------------
+preprocessing:
+  image_size:   224          # resize target (H = W)
+  center_crop:  224          # center crop for val/test
+
+  # ImageNet normalisation (standard for pretrained backbones)
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+  # Train augmentations
+  random_horizontal_flip: true
+  random_rotation_deg:    15
+  color_jitter:
+    brightness: 0.2
+    contrast:   0.2
+    saturation: 0.2
+    hue:        0.05
+
+
+# ----------------------------------------------------------
+# DETECTION  (YOLOv8 — pretrained, not trained here)
+# ----------------------------------------------------------
+detection:
+  # Model weights: local path or ultralytics auto-download name
+  weights: "yolov8n.pt"
+
+  # Minimum YOLO detection confidence to accept a box
+  conf_threshold: 0.30
+
+  # IoU threshold for NMS
+  iou_threshold: 0.45
+
+  # COCO class IDs to keep (fruits present in COCO-80)
+  # 46=banana, 47=apple, 49=orange
+  # Set to null / [] to keep ALL detected objects
+  filter_coco_ids:
+    - 46   # banana
+    - 47   # apple
+    - 49   # orange
+
+  # If true, fall back to full image when YOLO finds nothing
+  fallback_full_image: true
+
+
+# ----------------------------------------------------------
+# INFERENCE PIPELINE
+# ----------------------------------------------------------
+inference:
+  # Minimum EfficientNet classification confidence
+  confidence_threshold: 0.70
+
+  # Return label when below threshold
+  low_confidence_label: "Unknown"
+
+  # Device: "auto" | "cuda" | "cpu"
+  device: "auto"
