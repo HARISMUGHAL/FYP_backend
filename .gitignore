@@ -5,3 +5,6 @@ __pycache__/
 *.zip
 raw_data/
 FruitGrade_Dataset/
+ml/models/saved/
+*.pth
+*.csv
