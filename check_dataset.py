@@ -3,7 +3,7 @@ from pathlib import Path
 DATASET_PATH = Path("FruitGrade_Dataset")
 
 FRUITS = [
-    "apple","Apricot","banana","Grapes",
+    "apple","Apricot","Grapes",
     "guava","Honeydew","Orange","Tangerine"
 ]
 
