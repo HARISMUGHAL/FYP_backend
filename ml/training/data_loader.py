@@ -2,8 +2,12 @@
 ml/training/data_loader.py
 --------------------------
 Builds torchvision DataLoaders for train / val / test splits.
-Applies data augmentation on the training set; deterministic
-resize + centre-crop on val / test.
+
+v2 — Stronger augmentation pipeline:
+  - RandomResizedCrop (scale invariance, partial-fruit views)
+  - Stronger ColorJitter (brightness/contrast/saturation/hue)
+  - RandomGrayscale (prevents pure-colour bias between similar fruits)
+  - Deterministic Resize(256) → CenterCrop(224) for val/test
 """
 
 from pathlib import Path
@@ -25,6 +29,17 @@ def get_transforms(split: str, cfg: dict) -> transforms.Compose:
     """
     Return the appropriate torchvision transform pipeline for a split.
 
+    Training pipeline (v2):
+        RandomResizedCrop  → scale-invariant fruit learning
+        RandomHorizontalFlip
+        RandomRotation
+        ColorJitter        → stronger than v1
+        RandomGrayscale    → prevents colour-only discrimination
+        ToTensor → Normalize
+
+    Val / test pipeline (deterministic):
+        Resize(resize_size) → CenterCrop(center_crop) → ToTensor → Normalize
+
     Args:
         split: "train" | "val" | "test"
         cfg:   Config dict.
@@ -32,26 +47,48 @@ def get_transforms(split: str, cfg: dict) -> transforms.Compose:
     Returns:
         torchvision.transforms.Compose
     """
-    pp = cfg["preprocessing"]
-    size   = pp["image_size"]
-    crop   = pp["center_crop"]
-    mean   = pp["mean"]
-    std    = pp["std"]
+    pp          = cfg["preprocessing"]
+    size        = pp["image_size"]          # 224 — final spatial size
+    resize_size = pp.get("resize_size", 256)  # 256 — pre-crop resize for val/test
+    crop        = pp["center_crop"]         # 224
+    mean        = pp["mean"]
+    std         = pp["std"]
 
-    # ── Normalise ──────────────────────────────────────────────────
     normalise = transforms.Normalize(mean=mean, std=std)
 
+    # ── Training: aggressive augmentation ────────────────────────────────────
     if split == "train":
-        aug_list: list = [
-            transforms.Resize((size, size)),
-        ]
-        if pp.get("random_horizontal_flip"):
+        aug_list: list = []
+
+        # 1. RandomResizedCrop — THE most important augmentation for fruits.
+        #    Teaches the model to recognise fruit at any scale and position,
+        #    matching real-world camera distances far better than plain Resize.
+        rrc_cfg = pp.get("random_resized_crop", {})
+        if rrc_cfg.get("enabled", True):
+            scale_min = float(rrc_cfg.get("scale_min", 0.60))
+            scale_max = float(rrc_cfg.get("scale_max", 1.00))
+            aug_list.append(
+                transforms.RandomResizedCrop(
+                    size,
+                    scale=(scale_min, scale_max),
+                    ratio=(0.75, 1.333),
+                    interpolation=transforms.InterpolationMode.BILINEAR,
+                )
+            )
+        else:
+            # Fallback if RRC is disabled in config
+            aug_list.append(transforms.Resize((size, size)))
+
+        # 2. Horizontal flip
+        if pp.get("random_horizontal_flip", True):
             aug_list.append(transforms.RandomHorizontalFlip())
 
+        # 3. Rotation
         rot_deg = pp.get("random_rotation_deg", 0)
         if rot_deg > 0:
             aug_list.append(transforms.RandomRotation(rot_deg))
 
+        # 4. ColorJitter — stronger than v1 to teach colour-invariant features
         cj = pp.get("color_jitter", {})
         if cj:
             aug_list.append(
@@ -63,12 +100,21 @@ def get_transforms(split: str, cfg: dict) -> transforms.Compose:
                 )
             )
 
+        # 5. RandomGrayscale — small probability forces shape-based learning,
+        #    not just colour-based.  Helps distinguish apple vs orange vs apricot.
+        gs_prob = pp.get("random_grayscale_prob", 0.0)
+        if gs_prob > 0:
+            aug_list.append(transforms.RandomGrayscale(p=gs_prob))
+
         aug_list += [transforms.ToTensor(), normalise]
         return transforms.Compose(aug_list)
 
-    # val / test — deterministic
+    # ── Val / test: deterministic ─────────────────────────────────────────────
+    # Resize to slightly larger than crop, then center-crop.
+    # This is the standard torchvision EfficientNet evaluation protocol and
+    # gives slightly better accuracy than a plain Resize(224).
     return transforms.Compose([
-        transforms.Resize((size, size)),
+        transforms.Resize((resize_size, resize_size)),
         transforms.CenterCrop(crop),
         transforms.ToTensor(),
         normalise,
@@ -116,16 +162,18 @@ def get_dataloaders(cfg: dict) -> dict[str, DataLoader]:
             loaders[split] = None  # type: ignore[assignment]
             continue
 
-        tfm = get_transforms(split, cfg)
+        tfm     = get_transforms(split, cfg)
         dataset = datasets.ImageFolder(root=str(root), transform=tfm)
 
         shuffle = split == "train"
-        loader = DataLoader(
+        loader  = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            # persistent_workers requires num_workers > 0
+            persistent_workers=(num_workers > 0),
         )
 
         logger.info(

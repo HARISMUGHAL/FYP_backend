@@ -1,250 +1,111 @@
-"""
-ml/training/trainer.py
------------------------
-Training and validation loops for EfficientNet-B0.
-
-Features:
-  - Per-epoch train / val pass with loss & accuracy tracking
-  - Best-model checkpoint based on validation accuracy
-  - CosineAnnealingLR scheduler
-  - Early stopping
-  - Metrics CSV export
-"""
-
-import csv
-import time
-from pathlib import Path
-
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+import torch.optim as optim
+import os
+import copy
 
-from ml.models.model_builder import save_checkpoint
-from ml.utils.helpers import ensure_dir, setup_logger
+def compute_class_weights(train_loader, num_classes):
+    class_counts = [0] * num_classes
+    for _, labels in train_loader:
+        for label in labels:
+            class_counts[label] += 1
+            
+    total = sum(class_counts)
+    class_weights = []
+    for count in class_counts:
+        weight = total / (num_classes * count) if count > 0 else 0.0
+        class_weights.append(weight)
+        
+    return torch.tensor(class_weights, dtype=torch.float)
 
-logger = setup_logger(__name__)
-
-
-# ─────────────────────────────────────────────
-# Single-epoch passes
-# ─────────────────────────────────────────────
-
-def train_one_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
-) -> tuple[float, float]:
-    """
-    Run one full training epoch.
-
-    Returns:
-        (avg_loss, accuracy_percentage)
-    """
-    model.train()
-    running_loss   = 0.0
-    correct        = 0
-    total          = 0
-
-    pbar = tqdm(loader, desc="  [train]", leave=False, unit="batch")
-    for images, labels in pbar:
-        images, labels = images.to(device), labels.to(device)
-
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss    = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item() * images.size(0)
-        preds  = outputs.argmax(dim=1)
-        correct += (preds == labels).sum().item()
-        total   += labels.size(0)
-
-        pbar.set_postfix(loss=f"{loss.item():.4f}")
-
-    avg_loss = running_loss / total
-    accuracy = 100.0 * correct / total
-    return avg_loss, accuracy
-
-
-@torch.no_grad()
-def validate(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device,
-) -> tuple[float, float]:
-    """
-    Run one full validation / test pass (no gradient computation).
-
-    Returns:
-        (avg_loss, accuracy_percentage)
-    """
-    model.eval()
-    running_loss = 0.0
-    correct      = 0
-    total        = 0
-
-    pbar = tqdm(loader, desc="  [val]  ", leave=False, unit="batch")
-    for images, labels in pbar:
-        images, labels = images.to(device), labels.to(device)
-
-        outputs = model(images)
-        loss    = criterion(outputs, labels)
-
-        running_loss += loss.item() * images.size(0)
-        preds  = outputs.argmax(dim=1)
-        correct += (preds == labels).sum().item()
-        total   += labels.size(0)
-
-    avg_loss = running_loss / total
-    accuracy = 100.0 * correct / total
-    return avg_loss, accuracy
-
-
-# ─────────────────────────────────────────────
-# Full training loop
-# ─────────────────────────────────────────────
-
-def train(
-    model: nn.Module,
-    dataloaders: dict[str, DataLoader],
-    cfg: dict,
-    device: torch.device,
-) -> nn.Module:
-    """
-    Full training loop with scheduler, early stopping and checkpointing.
-
-    Args:
-        model:       Model to train (already on device).
-        dataloaders: {"train": DataLoader, "val": DataLoader, ...}
-        cfg:         Config dict.
-        device:      Training device.
-
-    Returns:
-        Model loaded with the best checkpoint weights.
-    """
-    t_cfg = cfg["training"]
-    epochs        = t_cfg["epochs"]
-    patience      = t_cfg["early_stopping_patience"]
-    metrics_csv   = Path(t_cfg["metrics_csv"])
-    ensure_dir(metrics_csv.parent)
-
-    # ── Optimiser ─────────────────────────────────────────────────
-    opt_name = t_cfg["optimizer"].lower()
-    lr       = t_cfg["learning_rate"]
-    wd       = t_cfg["weight_decay"]
-
-    if opt_name == "adamw":
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    elif opt_name == "adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
-    elif opt_name == "sgd":
-        optimizer = torch.optim.SGD(
-            model.parameters(), lr=lr, momentum=0.9, weight_decay=wd
-        )
-    else:
-        raise ValueError(f"Unknown optimizer: {opt_name}")
-
-    # ── Scheduler ─────────────────────────────────────────────────
-    scheduler_name = t_cfg.get("scheduler", "none").lower()
-    if scheduler_name == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=t_cfg.get("t_max", epochs)
-        )
-    elif scheduler_name == "step":
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
-    else:
-        scheduler = None
-
-    # ── Loss ──────────────────────────────────────────────────────
-    criterion = nn.CrossEntropyLoss()
-
-    # ── Tracking ──────────────────────────────────────────────────
-    best_val_acc   = 0.0
-    no_improve     = 0
-    best_ckpt_path = Path(cfg["model"]["save_dir"]) / cfg["model"]["checkpoint_name"]
-
-    # CSV header
-    with open(metrics_csv, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "lr"])
-
-    logger.info("=" * 55)
-    logger.info(f"Training on {device} | epochs={epochs} | lr={lr} | optimizer={opt_name}")
-    logger.info("=" * 55)
-
-    for epoch in range(1, epochs + 1):
-        t_start = time.time()
-        current_lr = optimizer.param_groups[0]["lr"]
-
-        # ── Train pass ────────────────────────────────────────────
-        train_loss, train_acc = train_one_epoch(
-            model, dataloaders["train"], optimizer, criterion, device
-        )
-
-        # ── Val pass ──────────────────────────────────────────────
-        val_loss, val_acc = validate(
-            model, dataloaders["val"], criterion, device
-        )
-
-        # ── Scheduler step ────────────────────────────────────────
-        if scheduler is not None:
-            scheduler.step()
-
-        elapsed = time.time() - t_start
-        logger.info(
-            f"Epoch [{epoch:>3}/{epochs}] "
-            f"train_loss={train_loss:.4f}  train_acc={train_acc:.2f}%  "
-            f"val_loss={val_loss:.4f}  val_acc={val_acc:.2f}%  "
-            f"lr={current_lr:.2e}  ({elapsed:.1f}s)"
-        )
-
-        # ── CSV log ───────────────────────────────────────────────
-        with open(metrics_csv, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                epoch,
-                f"{train_loss:.6f}", f"{train_acc:.4f}",
-                f"{val_loss:.6f}",   f"{val_acc:.4f}",
-                f"{current_lr:.8f}",
-            ])
-
-        # ── Best checkpoint ───────────────────────────────────────
+def train_model(model, train_loader, val_loader, config, class_names):
+    device = torch.device("cpu")
+    model.to(device)
+    
+    epochs = config['training']['epochs']
+    lr = config['training']['lr']
+    patience = config['training']['patience']
+    save_path = config['model']['save_path']
+    
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    class_weights = compute_class_weights(train_loader, len(class_names)).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    
+    best_val_acc = 0.0
+    epochs_no_improve = 0
+    best_model_wts = copy.deepcopy(model.state_dict())
+    
+    for epoch in range(epochs):
+        print(f"Epoch {epoch+1}/{epochs}")
+        print("-" * 10)
+        
+        # Training phase
+        model.train()
+        running_loss = 0.0
+        running_corrects = 0
+        total_samples = 0
+        
+        for inputs, labels in train_loader:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            optimizer.zero_grad()
+            
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            _, preds = torch.max(outputs, 1)
+            
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
+            total_samples += inputs.size(0)
+            
+        train_loss = running_loss / total_samples
+        train_acc = running_corrects.double() / total_samples
+        
+        print(f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f}")
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        val_corrects = 0
+        val_samples = 0
+        
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                _, preds = torch.max(outputs, 1)
+                
+                val_loss += loss.item() * inputs.size(0)
+                val_corrects += torch.sum(preds == labels.data)
+                val_samples += inputs.size(0)
+                
+        val_loss = val_loss / val_samples
+        val_acc = val_corrects.double() / val_samples
+        
+        print(f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
+        
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            no_improve   = 0
-            save_checkpoint(
-                model, optimizer, epoch,
-                {"val_acc": round(val_acc, 4), "val_loss": round(val_loss, 6)},
-                cfg,
-                filename=cfg["model"]["checkpoint_name"],
-            )
-            logger.info(f"  ★ New best val_acc={val_acc:.2f}% — checkpoint saved")
+            best_model_wts = copy.deepcopy(model.state_dict())
+            torch.save(model.state_dict(), save_path)
+            epochs_no_improve = 0
+            print("Saved new best model.")
         else:
-            no_improve += 1
-            logger.info(f"  No improvement ({no_improve}/{patience})")
-
-        # ── Early stopping ────────────────────────────────────────
-        if no_improve >= patience:
-            logger.info(f"Early stopping triggered after {epoch} epochs.")
+            epochs_no_improve += 1
+            
+        if epochs_no_improve >= patience:
+            print("Early stopping triggered.")
             break
-
-    # ── Save final model ──────────────────────────────────────────
-    save_checkpoint(
-        model, optimizer, epoch,
-        {"val_acc": round(val_acc, 4)},
-        cfg,
-        filename=cfg["model"]["final_name"],
-    )
-
-    # ── Reload best weights ───────────────────────────────────────
-    logger.info(f"Loading best checkpoint from {best_ckpt_path}")
-    ckpt = torch.load(best_ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-
-    logger.info(f"Training complete. Best val_acc = {best_val_acc:.2f}%")
+            
+    print(f"Best Validation Accuracy: {best_val_acc:.4f}")
+    model.load_state_dict(best_model_wts)
     return model
