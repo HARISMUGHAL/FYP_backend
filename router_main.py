@@ -10,6 +10,7 @@ from Models import Fruit
 from Controllers.Lanlord_controller import LandlordController
 from Controllers.Farm_controller import FarmController
 from Controllers.Batch_controller import BatchController
+from Controllers.FruitAnalyzer_controller import FruitAnalyzerController
 app = Flask(__name__)
 init_db(app)
 with app.app_context():
@@ -70,6 +71,20 @@ def get_all_batch():
 def get_batches_report():
     return BatchController.get_batches_report()
 
+# FruitAnalyzer realtime APIs
+@app.post('/predict')
+def predict():
+    return FruitAnalyzerController.predict()
+
+@app.get('/batch')
+def get_batch():
+    # Reuse existing batch controller logic as-is.
+    return BatchController.get_all_batch()
+
+@app.get('/health')
+def health():
+    return FruitAnalyzerController.health()
+
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)

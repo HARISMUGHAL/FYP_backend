@@ -1,6 +1,5 @@
 import os
 import sys
-import yaml
 import torch
 from torchvision import transforms
 from PIL import Image
@@ -10,39 +9,9 @@ import torch.nn.functional as F
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from ml.models.fruit_model import build_model
-from ml.utils.helpers import load_class_mapping
+from ml.utils.helpers import load_class_mapping, load_yaml
 
-def predict_image(image_path, config_path="configs/config.yaml"):
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-        
-    try:
-        class_names = load_class_mapping()
-    except FileNotFoundError:
-        print("Class mapping not found. Please run scripts/train.py first.")
-        return None
-        
-    model_path = config['model']['save_path']
-    if not os.path.exists(model_path):
-        print(f"Model file not found at {model_path}. Please run scripts/train.py first.")
-        return None
-        
-    model = build_model(
-        num_classes=len(class_names),
-        pretrained=False,
-        dropout_rate=config['model']['dropout_rate']
-    )
-    
-    model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
-    model.eval()
-    
-    img_size = config['dataset']['img_size']
-    transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
+def predict_image(image_path, model, transform, class_names):
     try:
         image = Image.open(image_path).convert("RGB")
     except Exception as e:
@@ -55,6 +24,7 @@ def predict_image(image_path, config_path="configs/config.yaml"):
         outputs = model(input_tensor)
         probabilities = F.softmax(outputs, dim=1).squeeze().tolist()
         
+    # Safely handle single vs multiple class outputs
     if not isinstance(probabilities, list):
         probabilities = [probabilities]
         
@@ -62,26 +32,91 @@ def predict_image(image_path, config_path="configs/config.yaml"):
     probs_with_classes.sort(key=lambda x: x[1], reverse=True)
     
     top_label, top_prob = probs_with_classes[0]
-    top_3 = [{"label": label, "prob": round(prob, 4)} for label, prob in probs_with_classes[:3]]
     
-    result = {
+    return {
         "label": top_label,
-        "confidence": round(top_prob, 4),
-        "top_3": top_3
+        "confidence": top_prob
     }
-    
-    return result
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python scripts/test.py <image_path>")
+    test_dir = "test_images"
+    if not os.path.exists(test_dir):
+        print(f"Directory {test_dir} not found.")
         return
         
-    image_path = sys.argv[1]
-    result = predict_image(image_path)
-    if result:
-        import json
-        print(json.dumps(result, indent=2))
+    config_path = "configs/config.yaml"
+    if not os.path.exists(config_path):
+        print(f"Config file not found at {config_path}")
+        return
+        
+    config = load_yaml(config_path)
+    
+    try:
+        class_names = load_class_mapping()
+    except FileNotFoundError:
+        print("Class mapping not found. Please run scripts/train.py first.")
+        return
+        
+    model_path = config.get('model', {}).get('save_path', "ml/models/saved/best_model.pth")
+    if not os.path.exists(model_path):
+        print(f"Model file not found at {model_path}. Please run scripts/train.py first.")
+        return
+        
+    model = build_model(
+        num_classes=len(class_names),
+        pretrained=False,
+        dropout_rate=config.get('model', {}).get('dropout_rate', 0.3)
+    )
+    
+    model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
+    model.eval()
+    
+    img_size = config.get('dataset', {}).get('img_size', 224)
+    transform = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    image_files = sorted([f for f in os.listdir(test_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    
+    if not image_files:
+        print(f"No images found in {test_dir}")
+        return
+
+    for img_file in image_files:
+        img_path = os.path.join(test_dir, img_file)
+        result = predict_image(img_path, model, transform, class_names)
+        
+        if result is None:
+            continue
+            
+        label = result["label"]
+        confidence = result["confidence"]
+        
+        # Parse label (e.g., apple_A -> fruit=apple, grade=A)
+        parts = label.split("_")
+        fruit = parts[0]
+        
+        grade = None
+        if len(parts) > 1:
+            grade = parts[1]
+            
+        status = "KNOWN"
+        
+        # Unknown handling
+        if confidence < 0.65:
+            fruit = "unknown"
+            grade = None
+            status = "UNKNOWN"
+            
+        print("-" * 34)
+        print(f"Image: {img_file}")
+        print(f"Fruit: {fruit}")
+        print(f"Grade: {grade}")
+        print(f"Confidence: {confidence:.3f}")
+        print(f"Status: {status}")
+        print("-" * 34)
 
 if __name__ == "__main__":
     main()

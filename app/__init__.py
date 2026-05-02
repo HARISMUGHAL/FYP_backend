@@ -1,0 +1,1 @@
+"""FruitAnalyzer realtime application package."""
