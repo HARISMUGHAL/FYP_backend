@@ -1,3 +1,16 @@
+"""
+scripts/train.py
+----------------
+Primary training script for the fruit classification model.
+
+Usage:
+    python scripts/train.py
+    python scripts/train.py --config configs/config.yaml
+
+This script uses the simple data loader from ml/preprocessing/dataset.py
+which automatically scans FruitGrade_Dataset/<fruit>/<grade>/ folders.
+"""
+
 import os
 import sys
 import yaml
@@ -19,8 +32,13 @@ def main():
         
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
-        
-    data_dir = config['dataset']['path']
+
+    # ── Flexible dataset path resolution ──────────────────────
+    data_dir = (
+        config.get("dataset", {}).get("path")
+        or config.get("data", {}).get("raw_dir")
+        or "FruitGrade_Dataset"
+    )
     if not os.path.exists(data_dir):
         print(f"Error: Dataset path '{data_dir}' does not exist.")
         print("Please ensure the dataset is placed correctly.")
@@ -29,10 +47,10 @@ def main():
     print("Loading dataset and creating dataloaders...")
     train_loader, val_loader, class_names = get_dataloaders(
         data_dir=data_dir,
-        img_size=config['dataset']['img_size'],
-        batch_size=config['dataset']['batch_size'],
-        val_split=config['dataset']['val_split'],
-        num_workers=config['dataset']['num_workers']
+        img_size=config.get('dataset', {}).get('img_size', 224),
+        batch_size=config.get('dataset', {}).get('batch_size', 32),
+        val_split=config.get('dataset', {}).get('val_split', 0.2),
+        num_workers=config.get('dataset', {}).get('num_workers', 0),
     )
     
     if len(class_names) == 0:
@@ -45,8 +63,8 @@ def main():
     print("Building model...")
     model = build_model(
         num_classes=len(class_names),
-        pretrained=config['model']['pretrained'],
-        dropout_rate=config['model']['dropout_rate']
+        pretrained=config.get('model', {}).get('pretrained', True),
+        dropout_rate=config.get('model', {}).get('dropout_rate', 0.4),
     )
     
     print("Starting training...")
@@ -54,7 +72,7 @@ def main():
     
     print("Evaluating best model...")
     evaluate_model(best_model, val_loader, class_names)
-    print(f"Training complete. Model saved to {config['model']['save_path']}")
+    print(f"Training complete. Model saved to {config.get('model', {}).get('save_path', 'ml/models/saved/best_model.pth')}")
 
 if __name__ == "__main__":
     main()

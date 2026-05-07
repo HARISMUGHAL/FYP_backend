@@ -23,15 +23,17 @@ class InferenceService:
     """
     Thin wrapper around existing ML pipeline.
     Does not modify or reimplement pipeline behavior.
+
+    IMPORTANT: The confidence threshold is applied ONCE inside the
+    predictor (FruitGradePredictor).  This service does NOT re-check
+    or override the threshold decision.
     """
 
     def __init__(
         self,
         config_path: str | Path = "configs/config.yaml",
-        confidence_threshold: float = 0.7,
     ) -> None:
         self.config_path = Path(config_path)
-        self.confidence_threshold = confidence_threshold
 
         cfg: dict[str, Any] = load_yaml(str(self.config_path))
         self.pipe = InferencePipeline(cfg)
@@ -40,9 +42,9 @@ class InferenceService:
         """
         Predict one frame using the existing pipeline.
 
-        Preferred call from user requirement:
-            pipe.run_on_image(frame)
-        Fallbacks are used for compatibility if that method is unavailable.
+        The pipeline's predictor already applies the confidence threshold
+        from config.yaml.  This method trusts that decision and does NOT
+        apply a second threshold check.
         """
         result: Any
 
@@ -62,24 +64,19 @@ class InferenceService:
                 raise RuntimeError("Pipeline returned empty prediction list.")
             result = result[0]
 
-        fruit = str(result.get("fruit", "unknown"))
-        grade = result.get("grade")
-        label = str(result.get("label", "unknown"))
+        # ── Trust the predictor's threshold decision ──────────────
+        # Do NOT re-check confidence against a local threshold here.
+        # The predictor is the SINGLE source of truth.
+        fruit      = str(result.get("fruit", "unknown"))
+        grade      = result.get("grade")
+        label      = str(result.get("label", "unknown"))
         confidence = float(result.get("confidence", 0.0))
-
-        if confidence < self.confidence_threshold:
-            return Prediction(
-                fruit="unknown",
-                grade=None,
-                confidence=confidence,
-                label="unknown",
-                status="UNKNOWN",
-            )
+        status     = str(result.get("status", "UNKNOWN" if result.get("unknown", True) else "KNOWN"))
 
         return Prediction(
             fruit=fruit,
             grade=str(grade) if grade is not None else None,
             confidence=confidence,
             label=label,
-            status="KNOWN",
+            status=status,
         )

@@ -39,9 +39,9 @@ def setup_logger(name: str) -> logging.Logger:
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
+    handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.propagate = False
@@ -68,18 +68,20 @@ def get_device(preferred: str | None = None) -> torch.device:
 def resolve_cfg_paths(cfg: dict, base_dir: str | Path) -> dict:
     """
     Resolve common relative config paths to absolute paths.
+    Supports both legacy 'data' and new 'dataset' sections.
     """
     root = Path(base_dir).resolve()
     out = dict(cfg)
 
-    for section in ("data", "model", "detection"):
+    for section in ("data", "model", "detection", "dataset"):
         if section in out and isinstance(out[section], dict):
             out[section] = dict(out[section])
 
     path_keys = {
         "data": ("raw_dir", "train_dir", "val_dir", "test_dir"),
-        "model": ("save_dir",),
+        "model": ("save_dir", "save_path"),
         "detection": ("weights",),
+        "dataset": ("path",),
     }
 
     for section, keys in path_keys.items():

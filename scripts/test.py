@@ -91,8 +91,8 @@ def main():
         if result is None:
             continue
             
-        label = result["label"]
-        confidence = result["confidence"]
+        label = result.get("label", "unknown")
+        confidence = result.get("confidence", 0.0)
         
         # Parse label (e.g., apple_A -> fruit=apple, grade=A)
         parts = label.split("_")

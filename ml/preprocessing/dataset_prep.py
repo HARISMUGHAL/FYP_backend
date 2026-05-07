@@ -37,9 +37,11 @@ def scan_raw_dataset(cfg: dict) -> dict[str, list[Path]]:
     Returns:
         {class_label: [Path, ...]}
     """
-    raw_dir = Path(cfg["data"]["raw_dir"])
-    skip = {s.lower() for s in cfg["data"].get("skip_folders", [])}
-    valid_exts = {e.lower() for e in cfg["data"]["image_extensions"]}
+    data_cfg = cfg.get("data", {})
+    dataset_cfg = cfg.get("dataset", {})
+    raw_dir = Path(data_cfg.get("raw_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
+    skip = {s.lower() for s in data_cfg.get("skip_folders", [])}
+    valid_exts = {e.lower() for e in data_cfg.get("image_extensions", [".jpg", ".jpeg", ".png"])}
 
     if not raw_dir.exists():
         raise FileNotFoundError(f"Raw dataset directory not found: {raw_dir.resolve()}")
@@ -147,15 +149,18 @@ def split_and_copy(
     Returns:
         Summary dict {label: {train: N, val: N, test: N}}
     """
-    set_seed(cfg["data"]["split_seed"])
+    data_cfg = cfg.get("data", {})
+    dataset_cfg = cfg.get("dataset", {})
+    
+    set_seed(data_cfg.get("split_seed", 42))
 
-    train_root = Path(cfg["data"]["train_dir"])
-    val_root   = Path(cfg["data"]["val_dir"])
-    test_root  = Path(cfg["data"]["test_dir"])
+    train_root = Path(data_cfg.get("train_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
+    val_root   = Path(data_cfg.get("val_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
+    test_root  = Path(data_cfg.get("test_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
 
-    train_r = cfg["data"]["train_ratio"]
-    val_r   = cfg["data"]["val_ratio"]
-    # test_r  = cfg["data"]["test_ratio"]  # implicit remainder
+    train_r = data_cfg.get("train_ratio", 0.7)
+    val_r   = data_cfg.get("val_ratio", 0.2)
+    # test_r  = data_cfg.get("test_ratio", 0.1)  # implicit remainder
 
     summary: dict[str, dict[str, int]] = {}
 
@@ -168,7 +173,7 @@ def split_and_copy(
         train_paths, valtest_paths = train_test_split(
             paths,
             train_size=train_r,
-            random_state=cfg["data"]["split_seed"],
+            random_state=data_cfg.get("split_seed", 42),
             shuffle=True,
         )
 
@@ -177,7 +182,7 @@ def split_and_copy(
         val_paths, test_paths = train_test_split(
             valtest_paths,
             train_size=relative_val,
-            random_state=cfg["data"]["split_seed"],
+            random_state=data_cfg.get("split_seed", 42),
             shuffle=True,
         )
 
@@ -239,9 +244,10 @@ def prepare_dataset(cfg: dict, dry_run: bool = False) -> dict:
     logger.info("=" * 55)
     logger.info("STEP 2 — Cleaning corrupt images")
     logger.info("=" * 55)
+    _data_cfg = cfg.get("data", {})
     class_map = clean_images(
         class_map,
-        min_size_bytes=cfg["data"]["min_file_size_bytes"],
+        min_size_bytes=_data_cfg.get("min_file_size_bytes", 1024),
     )
 
     logger.info("=" * 55)

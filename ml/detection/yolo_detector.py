@@ -3,6 +3,13 @@ ml/detection/yolo_detector.py
 ------------------------------
 Wraps YOLOv8 (Ultralytics) for fruit detection.
 
+Safe dual-model architecture:
+    1. Try to load PRIMARY weights (custom fruit model)
+    2. If not found -> fall back to OLD weights (COCO generic model)
+    3. If both fail -> full-image fallback (classifier handles everything)
+
+The system NEVER crashes. Detection failure = graceful degradation.
+
 Usage:
     detector = YOLODetector(cfg)
     boxes = detector.detect(image)   # image: np.ndarray (H, W, 3 BGR or RGB)
@@ -30,7 +37,7 @@ COCO_FRUIT_IDS: set[int] = {46, 47, 49}
 @dataclass
 class Detection:
     """A single YOLO detection result."""
-    bbox:       tuple[int, int, int, int]   # (x1, y1, x2, y2) — pixel coords
+    bbox:       tuple[int, int, int, int]   # (x1, y1, x2, y2) -- pixel coords
     confidence: float                        # YOLO detection confidence
     class_id:   int                          # COCO class id
     class_name: str                          # COCO class name (e.g. "apple")
@@ -40,47 +47,95 @@ class YOLODetector:
     """
     Lightweight wrapper around YOLOv8 for fruit region detection.
 
+    Safe dual-model fallback:
+        1. Tries to load ``weights`` (custom fruit model).
+        2. If file not found, falls back to ``weights_old`` (COCO model).
+        3. If both fail, all calls return full-image fallback.
+
     Args:
         cfg: Config dict from config.yaml.
 
     Config keys used (under ``detection``):
-        weights          : YOLOv8 weights file or ultralytics model name
-        conf_threshold   : Minimum detection confidence (YOLO)
-        iou_threshold    : NMS IoU threshold
-        filter_coco_ids  : List of COCO class IDs to keep; empty = keep all
+        weights            : PRIMARY model weights path
+        weights_old        : FALLBACK model weights (COCO generic)
+        conf_threshold     : Minimum detection confidence (YOLO)
+        iou_threshold      : NMS IoU threshold
+        filter_coco_ids    : List of COCO class IDs to keep; empty = keep all
         fallback_full_image: Return full-image box when nothing detected
     """
 
     def __init__(self, cfg: dict) -> None:
-        det_cfg = cfg["detection"]
+        det_cfg = cfg.get("detection", {})
 
-        self.weights          = det_cfg["weights"]
-        self.conf_threshold   = det_cfg["conf_threshold"]
-        self.iou_threshold    = det_cfg["iou_threshold"]
+        self.weights_primary  = det_cfg.get("weights", "yolov8n.pt")
+        self.weights_fallback = det_cfg.get("weights_old", "yolov8n.pt")
+        self.conf_threshold   = det_cfg.get("conf_threshold", 0.25)
+        self.iou_threshold    = det_cfg.get("iou_threshold", 0.45)
         self.filter_ids: set[int] = set(det_cfg.get("filter_coco_ids") or [])
         self.fallback         = det_cfg.get("fallback_full_image", True)
 
-        self._model = None   # lazy-load on first call
+        self._model = None          # lazy-load on first call
+        self._model_name = None     # which weights are active
+        self._model_failed = False  # True if both models failed to load
 
     def _load_model(self) -> None:
-        """Lazy-load the YOLO model (downloads weights if needed)."""
-        if self._model is not None:
+        """
+        Lazy-load the YOLO model with safe fallback.
+
+        Priority:
+            1. Load PRIMARY weights (custom fruit model)
+            2. If not found -> load FALLBACK weights (COCO generic)
+            3. If both fail -> set _model_failed, all detect() calls
+               will return full-image fallback
+        """
+        if self._model is not None or self._model_failed:
             return
+
         try:
             from ultralytics import YOLO
-        except ImportError as exc:
-            raise ImportError(
-                "ultralytics is not installed. "
+        except ImportError:
+            logger.error(
+                "[YOLO] ultralytics is not installed. "
+                "All detections will use full-image fallback. "
                 "Run: pip install ultralytics"
-            ) from exc
+            )
+            self._model_failed = True
+            return
 
-        logger.info(f"Loading YOLO model: {self.weights}")
-        self._model = YOLO(self.weights)
-        logger.info("YOLO model loaded ✓")
+        # ── Attempt 1: Load PRIMARY weights (custom fruit model) ──
+        primary_path = Path(self.weights_primary)
+        if primary_path.exists():
+            try:
+                logger.info(f"[BOOT] [YOLO] Loading PRIMARY model: {self.weights_primary}")
+                self._model = YOLO(str(primary_path))
+                self._model_name = str(self.weights_primary)
+                logger.info(f"[BOOT] [YOLO] PRIMARY model loaded OK: {self._model_name}")
+                return
+            except Exception as exc:
+                logger.warning(
+                    f"[BOOT] [YOLO] PRIMARY model failed to load: {exc}. "
+                    f"Trying fallback..."
+                )
 
-    # ─────────────────────────────────────────────
+        # ── Attempt 2: Load FALLBACK weights (COCO generic) ───────
+        logger.info(
+            f"[BOOT] [YOLO] PRIMARY model not found at: {self.weights_primary}. "
+            f"Falling back to: {self.weights_fallback}"
+        )
+        try:
+            self._model = YOLO(self.weights_fallback)
+            self._model_name = self.weights_fallback
+            logger.info(f"[BOOT] [YOLO] FALLBACK model loaded OK: {self._model_name}")
+        except Exception as exc:
+            logger.error(
+                f"[BOOT] [YOLO] FALLBACK model also failed: {exc}. "
+                "All detections will use full-image fallback."
+            )
+            self._model_failed = True
+
+    # ---------------------------------------------------------
     # Public API
-    # ─────────────────────────────────────────────
+    # ---------------------------------------------------------
 
     def detect(self, image: np.ndarray) -> list[Detection]:
         """
@@ -97,12 +152,39 @@ class YOLODetector:
         """
         self._load_model()
 
-        results = self._model.predict(
-            source=image,
-            conf=self.conf_threshold,
-            iou=self.iou_threshold,
-            verbose=False,
-        )
+        # ── If model loading failed entirely, return full-image fallback ──
+        if self._model_failed or self._model is None:
+            h, w = image.shape[:2]
+            logger.warning("[YOLO] No model available -- returning full-image fallback")
+            if self.fallback:
+                return [Detection(
+                    bbox=(0, 0, w, h),
+                    confidence=1.0,
+                    class_id=-1,
+                    class_name="full_image",
+                )]
+            return []
+
+        # ── Normal detection path ─────────────────────────────────
+        try:
+            results = self._model.predict(
+                source=image,
+                conf=self.conf_threshold,
+                iou=self.iou_threshold,
+                verbose=False,
+            )
+        except Exception as exc:
+            # YOLO inference crashed -- return full-image fallback
+            logger.error(f"[YOLO] Inference failed: {exc}")
+            h, w = image.shape[:2]
+            if self.fallback:
+                return [Detection(
+                    bbox=(0, 0, w, h),
+                    confidence=1.0,
+                    class_id=-1,
+                    class_name="full_image",
+                )]
+            return []
 
         detections: list[Detection] = []
 
@@ -130,9 +212,27 @@ class YOLODetector:
                     class_name=cls_name,
                 ))
 
+        # ── Debug: log all raw detections ─────────────────────────
+        if detections:
+            for i, d in enumerate(detections):
+                logger.debug(f"[YOLO] Detection {i}: class={d.class_name}({d.class_id}) "
+                      f"conf={d.confidence:.3f} bbox={d.bbox}")
+
+        # ── Smart filtering: keep only strongest detection ─────────
+        # On a conveyor belt, one image = one fruit. Multiple detections
+        # are usually noise or overlapping weak boxes. Keep the highest
+        # confidence detection and discard the rest.
+        if len(detections) > 1:
+            detections.sort(key=lambda d: d.confidence, reverse=True)
+            best = detections[0]
+            filtered_count = len(detections) - 1
+            detections = [best]
+            logger.debug(f"[YOLO] Kept best detection: {best.class_name} "
+                  f"conf={best.confidence:.3f} (filtered {filtered_count} weaker)")
+
         if not detections and self.fallback:
             h, w = image.shape[:2]
-            logger.debug("No YOLO detections — falling back to full image")
+            logger.info("No YOLO detections -- falling back to full image")
             detections.append(Detection(
                 bbox=(0, 0, w, h),
                 confidence=1.0,
@@ -140,7 +240,8 @@ class YOLODetector:
                 class_name="full_image",
             ))
 
-        logger.debug(f"  YOLO → {len(detections)} detection(s)")
+        logger.debug(f"[YOLO] Final: {len(detections)} detection(s) "
+              f"(threshold={self.conf_threshold}, model={self._model_name})")
         return detections
 
     def crop_detections(
@@ -151,6 +252,9 @@ class YOLODetector:
     ) -> list[tuple[np.ndarray, Detection]]:
         """
         Crop image regions for each detection.
+
+        Validates each crop is non-empty before including it.
+        Skips detections with zero-area bounding boxes (bad YOLO output).
 
         Args:
             image:      Source image (H, W, 3).
@@ -170,7 +274,30 @@ class YOLODetector:
             x2 = min(w, x2 + padding)
             y2 = min(h, y2 + padding)
 
+            # ── Guard: skip empty or degenerate bounding boxes ────
+            crop_h = y2 - y1
+            crop_w = x2 - x1
+            if crop_h < 5 or crop_w < 5:
+                logger.debug(f"[YOLO] Skipping tiny/empty crop "
+                      f"({crop_w}x{crop_h}) for {det.class_name}")
+                continue
+
             crop = image[y1:y2, x1:x2]
+
+            # ── Guard: verify crop is not empty after slicing ─────
+            if crop.size == 0:
+                logger.debug(f"[YOLO] Empty crop after slicing, skipping")
+                continue
+
             crops.append((crop, det))
 
         return crops
+
+    @property
+    def active_model(self) -> str:
+        """Return the name of the currently loaded model (for diagnostics)."""
+        if self._model_failed:
+            return "NONE (full-image fallback)"
+        if self._model_name:
+            return self._model_name
+        return "not loaded yet"

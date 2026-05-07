@@ -77,9 +77,11 @@ def ensure_splits_exist(cfg: dict) -> None:
     If any split is missing, run dataset preparation automatically
     (copies images only, does NOT retrain the model).
     """
-    train_dir = Path(cfg["data"]["train_dir"])
-    val_dir   = Path(cfg["data"]["val_dir"])
-    test_dir  = Path(cfg["data"]["test_dir"])
+    data_cfg = cfg.get("data", {})
+    dataset_cfg = cfg.get("dataset", {})
+    train_dir = Path(data_cfg.get("train_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
+    val_dir   = Path(data_cfg.get("val_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
+    test_dir  = Path(data_cfg.get("test_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
 
     splits_ok = (
         train_dir.exists() and any(train_dir.iterdir()) and
@@ -95,7 +97,9 @@ def ensure_splits_exist(cfg: dict) -> None:
         "[WARN] One or more dataset splits are missing. "
         "Running dataset preparation (no retraining)..."
     )
-    raw_dir = Path(cfg["data"]["raw_dir"])
+    data_cfg = cfg.get("data", {})
+    dataset_cfg = cfg.get("dataset", {})
+    raw_dir = Path(data_cfg.get("raw_dir", dataset_cfg.get("path", "FruitGrade_Dataset")))
     if not raw_dir.exists():
         logger.error(
             f"[ERROR] Raw dataset not found at: {raw_dir}\n"
@@ -116,7 +120,8 @@ def check_model_exists(cfg: dict) -> Path:
     Verify that the trained checkpoint exists.
     Returns the absolute Path to the checkpoint.
     """
-    ckpt_path = Path(cfg["model"]["save_dir"]) / cfg["model"]["checkpoint_name"]
+    model_cfg = cfg.get("model", {})
+    ckpt_path = Path(model_cfg.get("save_path", str(Path(model_cfg.get("save_dir", "ml/models/saved")) / model_cfg.get("checkpoint_name", "best_model.pth"))))
     if not ckpt_path.exists():
         logger.error(
             f"[ERROR] Model checkpoint not found: {ckpt_path}\n"

@@ -30,8 +30,10 @@ def build_model(cfg: dict, num_classes: int | None = None) -> nn.Module:
     Returns:
         nn.Module moved to the configured device.
     """
-    n_classes = num_classes if num_classes is not None else cfg["model"]["num_classes"]
-    pretrained = cfg["model"]["pretrained"]
+
+    model_cfg = cfg.get("model", {})
+    n_classes = num_classes if num_classes is not None else model_cfg.get("num_classes", 1000)
+    pretrained = model_cfg.get("pretrained", True)
 
     logger.info(
         f"Building EfficientNet-B0 | pretrained={pretrained} | num_classes={n_classes}"
@@ -51,7 +53,7 @@ def build_model(cfg: dict, num_classes: int | None = None) -> nn.Module:
         nn.Linear(in_features, n_classes),
     )
 
-    device = get_device(cfg["inference"]["device"])
+    device = get_device(cfg.get("inference", {}).get("device", "cpu"))
     model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -85,10 +87,18 @@ def save_checkpoint(
     Returns:
         Path where checkpoint was saved.
     """
-    save_dir = Path(cfg["model"]["save_dir"])
-    save_dir.mkdir(parents=True, exist_ok=True)
 
-    fname = filename or cfg["model"]["checkpoint_name"]
+    model_cfg = cfg.get("model", {})
+    save_path_str = model_cfg.get("save_path")
+    if save_path_str:
+        save_path_obj = Path(save_path_str)
+        save_dir = save_path_obj.parent
+        fname = filename or save_path_obj.name
+    else:
+        save_dir = Path(model_cfg.get("save_dir", "ml/models/saved"))
+        fname = filename or model_cfg.get("checkpoint_name", "best_model.pth")
+    
+    save_dir.mkdir(parents=True, exist_ok=True)
     save_path = save_dir / fname
 
     torch.save(
@@ -97,7 +107,7 @@ def save_checkpoint(
             "model_state_dict":     model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "metrics":    metrics,
-            "num_classes": cfg["model"]["num_classes"],
+            "num_classes": model_cfg.get("num_classes", 1000),
         },
         save_path,
     )
@@ -123,6 +133,7 @@ def load_checkpoint(
     Returns:
         (model, checkpoint_dict)
     """
+
     map_loc = device or torch.device("cpu")
     ckpt = torch.load(checkpoint_path, map_location=map_loc, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])

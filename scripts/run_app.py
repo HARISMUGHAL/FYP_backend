@@ -37,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.70,
-        help="Confidence threshold for KNOWN/UNKNOWN.",
+        default=0.55,
+        help="Confidence threshold (display only — actual threshold is in config.yaml).",
     )
     parser.add_argument(
         "--summary-every",
@@ -61,7 +61,6 @@ def main() -> None:
     camera = CameraService(CameraConfig(source=camera_source))
     infer = InferenceService(
         config_path=args.config,
-        confidence_threshold=args.threshold,
     )
     ui = ConsoleView(history_size=5)
     batch = BatchTracker()
